@@ -45,6 +45,7 @@ protected:
 	UPROPERTY() TObjectPtr<class UAnimSequence> AnimFire;
 	UPROPERTY() TArray<TObjectPtr<class UAnimSequence>> AnimDeath;
 	UPROPERTY() TObjectPtr<class USoundBase> SndShot;
+	UPROPERTY() TObjectPtr<class USoundBase> SndShotFar;
 	UPROPERTY() TObjectPtr<class UMaterialInterface> TracerMat;
 	TWeakObjectPtr<class UAnimSequence> Current;
 	float OnceTimer = 0.f;

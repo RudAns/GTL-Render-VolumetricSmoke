@@ -105,6 +105,10 @@ Valve 没有发表这项技术的讲座或论文。报告的主要依据是 Stea
 
 - 墙面、地面贴图与道具模型来自 [Poly Haven](https://polyhaven.com/)（CC0）。
 - 角色、动画与步枪来自 UE 第一人称 / 第三人称模板（Epic Games，按 Unreal Engine EULA 在 UE 项目中使用）。
+- 音效来自 OpenGameArt 上的 CC0 素材，用 ffmpeg 剪成单发、做淡出后放在 `SourceAssets/audio`：
+  - 步枪：[The Free Firearm Sound Library](https://opengameart.org/content/the-free-firearm-sound-library) 中 AR-15 的近距离录音（自己开枪，不做空间化）和中距离录音（其他人开枪，带回声，3D 衰减）。
+  - 高爆手雷：[25 CC0 bang / firework SFX](https://opengameart.org/content/25-cc0-bang-firework-sfx) 中的 `cannon_02`。
+  - 烟雾弹起爆：同一包中的短爆 `shot_03`，叠加 [Steam release sounds](https://opengameart.org/content/steam-release-sounds) 中的泄压声。
 
 ## 许可证
 

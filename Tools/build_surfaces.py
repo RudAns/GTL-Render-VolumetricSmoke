@@ -212,3 +212,44 @@ def run(fresh, Graph, log, build):
     build(grate, fresh, Graph, log)
     for p in PROPS:
         import_prop(p, log)
+    import_audio(log)
+
+
+# CC0 recordings from OpenGameArt, trimmed and mixed with ffmpeg (see README); everything but the player's own shot
+# is spatialised through one shared attenuation.
+SOUNDS = [("S_RifleShot", False), ("S_RifleShotFar", True), ("S_Explosion", True), ("S_SmokePop", True)]
+
+
+def import_audio(log):
+    dest = "/Game/SmokeLab/Audio"
+    att_path = f"{dest}/ATT_World"
+    if EAL.does_asset_exist(att_path):
+        att = unreal.load_asset(att_path)
+    else:
+        att = AT.create_asset("ATT_World", dest, unreal.SoundAttenuation, unreal.SoundAttenuationFactory())
+        s = att.get_editor_property("attenuation")
+        s.set_editor_property("attenuation_shape_extents", unreal.Vector(400.0, 0.0, 0.0))
+        s.set_editor_property("falloff_distance", 7000.0)
+        s.set_editor_property("distance_algorithm", unreal.AttenuationDistanceModel.NATURAL_SOUND)
+        att.set_editor_property("attenuation", s)
+        EAL.save_loaded_asset(att)
+    for name, spatial in SOUNDS:
+        path = f"{dest}/{name}"
+        if EAL.does_asset_exist(path):
+            continue
+        t = unreal.AssetImportTask()
+        t.set_editor_property("filename", os.path.join(SRC, "audio", name + ".wav"))
+        t.set_editor_property("destination_path", dest)
+        t.set_editor_property("automated", True)
+        t.set_editor_property("save", False)
+        t.set_editor_property("replace_existing", True)
+        t.set_editor_property("factory", unreal.SoundFactory())
+        AT.import_asset_tasks([t])
+        w = unreal.load_asset(path)
+        if w is None:
+            log("audio import failed", name)
+            continue
+        if spatial:
+            w.set_editor_property("attenuation_settings", att)
+        EAL.save_loaded_asset(w)
+        log("audio", name)

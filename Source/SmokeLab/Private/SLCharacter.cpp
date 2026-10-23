@@ -77,6 +77,7 @@ void ASLSoldier::BeginPlay()
 		if (UAnimSequence* S = Find<UAnimSequence>(P)) AnimDeath.Add(S);
 	SndShot = Find<USoundBase>(TEXT("/Game/SmokeLab/Audio/S_RifleShot.S_RifleShot"));
 	if (!SndShot) SndShot = Find<USoundBase>(TEXT("/Game/Weapons/GrenadeLauncher/Audio/FirstPersonTemplateWeaponFire02.FirstPersonTemplateWeaponFire02"));
+	SndShotFar = Find<USoundBase>(TEXT("/Game/SmokeLab/Audio/S_RifleShotFar.S_RifleShotFar"));
 	PlayLoop(AnimIdle);
 }
 
@@ -162,7 +163,10 @@ void ASLSoldier::MulticastDied_Implementation(bool bThroughSmoke)
 void ASLSoldier::PlayFireFx(const FVector& End)
 {
 	ASLFx::Tracer(GetWorld(), MuzzleLocation(), End, IsA<ASLBot>());
-	if (SndShot) UGameplayStatics::PlaySoundAtLocation(this, SndShot, MuzzleLocation(), IsA<ASLBot>() ? 0.7f : 0.55f, FMath::FRandRange(0.95f, 1.05f));
+	// my own rifle: the close-up recording, unspatialised; everyone else's: the mid-distance take with its echo, in 3D
+	const float Pitch = FMath::FRandRange(0.96f, 1.04f);
+	if (IsLocallyControlled() && !IsA<ASLBot>() && SndShot) UGameplayStatics::PlaySound2D(this, SndShot, 0.5f, Pitch);
+	else if (USoundBase* S = SndShotFar ? SndShotFar.Get() : SndShot.Get()) UGameplayStatics::PlaySoundAtLocation(this, S, MuzzleLocation(), 0.8f, Pitch);
 	if (AnimFire && OnceTimer <= 0.f) PlayOnce(AnimFire, 0.18f);
 }
 
