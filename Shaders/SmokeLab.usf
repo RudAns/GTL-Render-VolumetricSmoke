@@ -26,6 +26,7 @@ float4 LightP[6];		// position (TW), radius
 float4 LightC[6];		// colour * candela
 float VoxelCm;
 float Time;
+float3 PreViewT;				// translated world - PreViewT = world: noise must live in world space, not move with the camera
 uint NoiseMode;					// 0 none, 1 procedural, 2 texture
 uint LightMode;					// 0 cache, 1 shadow ray, 2 unlit
 uint DebugView;					// 0 smoke, 1 arrival heat map, 2 cache only
@@ -161,7 +162,7 @@ float Density(float3 P, bool bNoise, out float Heat)
 	float3 Push;
 	const float Carve = BulletCarve(P, Push);
 	const float3 PN = P + Push * pow(Carve, 3) * 50;
-	const float3 PW = (bNoise && NoiseMode != 0) ? PN + WarpOffset(PN) * (VoxelCm * 0.9) : P;
+	const float3 PW = (bNoise && NoiseMode != 0) ? PN + WarpOffset(PN - PreViewT) * (VoxelCm * 0.9) : P;
 	for (uint I = 0; I < NumSmokes; ++I)
 	{
 		float Depth;
@@ -170,7 +171,7 @@ float Density(float3 P, bool bNoise, out float Heat)
 		Di *= BlastFactor(P, (uint)SmokeB[I].w);
 		if (bNoise && NoiseMode != 0)
 		{
-			const float N = saturate(NoiseValue(PN) * 1.8 - 0.35);
+			const float N = saturate(NoiseValue(PN - PreViewT) * 1.8 - 0.35);
 			Di *= GameplayFloor ? lerp(N, 1.0, smoothstep(0.3, 1.0, Depth)) : N;
 		}
 		if (DebugView == 1)

@@ -34,6 +34,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSLCommonParameters, )
 	SHADER_PARAMETER_ARRAY(FVector4f, LightC, [SLRender::MaxLights])
 	SHADER_PARAMETER(float, VoxelCm)
 	SHADER_PARAMETER(float, Time)
+	SHADER_PARAMETER(FVector3f, PreViewT)
 	SHADER_PARAMETER(uint32, NoiseMode)
 	SHADER_PARAMETER(uint32, LightMode)
 	SHADER_PARAMETER(uint32, DebugView)
@@ -320,6 +321,7 @@ void FSLSmokeRenderer::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder
 		}
 		C.VoxelCm = F.VoxelCm;
 		C.Time = F.Time;
+		C.PreViewT = FVector3f(PreView);
 		C.NoiseMode = (uint32)F.Settings.Noise;
 		C.LightMode = (uint32)F.Settings.Lighting;
 		C.DebugView = (uint32)F.Settings.DebugView;
