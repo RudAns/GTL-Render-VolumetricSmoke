@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>响应式体积烟雾：UE5 落地要点</title><style>
+:root{--bg:#fbfaf7;--fg:#1f2328;--muted:#5d6670;--line:#e3e0d8;--accent:#17706b;--warn:#b9551f;--code:#f2efe8;--panel:#ffffff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#e6e6e3;--muted:#9aa3ad;--line:#2d3138;--accent:#4fb2a8;--warn:#e48a54;--code:#20242a;--panel:#1d2025;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#e6e6e3;--muted:#9aa3ad;--line:#2d3138;--accent:#4fb2a8;--warn:#e48a54;--code:#20242a;--panel:#1d2025;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",system-ui,sans-serif}
+.wrap{display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;max-width:1240px;margin:0 auto;padding:40px 24px 80px}
+nav{position:sticky;top:24px;align-self:start;font-size:14px}
+nav .t{font-weight:700;margin-bottom:8px;color:var(--muted);letter-spacing:.05em}
+nav ol{list-style:none;margin:0;padding:0;border-left:2px solid var(--line)}
+nav li a{display:block;padding:4px 12px;color:var(--muted);text-decoration:none}
+nav li a:hover{color:var(--accent)}
+main{min-width:0}
+main>p,main>ul,main>ol,main>h2,main>h3,header{max-width:46em}
+header h1{font-size:30px;line-height:1.3;margin:0 0 8px;text-wrap:balance}
+header .sub{color:var(--muted);margin:0 0 28px}
+h2{font-size:22px;margin:48px 0 12px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:18px;margin:28px 0 8px}
+p,li{margin:8px 0}
+code{font-family:"Cascadia Code",Consolas,monospace;font-size:.88em;background:var(--code);padding:1px 5px;border-radius:4px}
+pre{background:var(--code);padding:14px 16px;border-radius:8px;overflow-x:auto;max-width:60em}
+pre code{background:none;padding:0;font-size:13.5px;line-height:1.6}
+table{border-collapse:collapse;margin:12px 0 20px;font-size:14.5px;display:block;overflow-x:auto;max-width:100%}
+th,td{border:1px solid var(--line);padding:6px 12px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+td{font-variant-numeric:tabular-nums}
+.diagram{margin:20px 0 28px;max-width:62em}
+.diagram svg{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:8px;background:#fff}
+.diagram figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+.note{border-left:3px solid var(--warn);background:var(--panel);padding:10px 14px;border-radius:0 8px 8px 0;max-width:46em;margin:14px 0}
+a{color:var(--accent)}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:16px;padding:24px 16px}nav{position:static}}
+</style></head>
+<body><div class="wrap">
+<nav><div class="t">目录</div><ol>
+<li><a href="#s1">1. 总览</a></li>
+<li><a href="#s2">2. 什么走网络</a></li>
+<li><a href="#s3">3. 关卡体素化</a></li>
+<li><a href="#s4">4. 扩散：到达距离场</a></li>
+<li><a href="#s5">5. 生长、消散与上传</a></li>
+<li><a href="#s6">6. 子弹与高爆：事件挖空</a></li>
+<li><a href="#s7">7. 渲染管线</a></li>
+<li><a href="#s8">8. 玩法遮挡与哨兵视线</a></li>
+<li><a href="#s9">9. 同步与相关性剔除</a></li>
+<li><a href="#s10">10. 射击：枪口与瞄准点</a></li>
+<li><a href="#s11">11. 测量与自测</a></li>
+<li><a href="#s12">12. 坑点清单</a></li>
+<li><a href="#s13">13. 移植清单</a></li>
+</ol></nav>
+<main>
+<header>
+<h1>响应式体积烟雾：UE5 落地要点</h1>
+<p class="sub">对应工程 GTL-Render-VolumetricSmoke（UE 5.8，C++ 加一个全局着色器模块，不改引擎）。本文按数据流顺序列出《反恐精英2》式烟雾的每一步做法：关卡体素化、三种扩散规则、到达距离场、按事件时间挖空、RDG 光线步进、玩法遮挡和联网同步，并附关键常数、坑点和移植清单，可以直接对照源码搬进自己的项目。原理、业界方案对比与推断依据见 <a href="Research.html">Research.html</a>。</p>
+</header>
+
+<h2 id="s1">1. 总览</h2>
+<p>核心思路是：<strong>每颗烟只存一份“到达距离场”，其余一切都是这份场加上时间的函数。</strong>烟雾弹起爆时，在关卡体素里做一次填充，记下每个体素被烟到达的距离（每格一个字节）。之后的生长、消散、子弹通道和高爆清空都在着色器里按“当前时刻”和几个事件参数现算，不需要改写体素。玩法判定（哨兵视线）在 CPU 上沿线积分同一份场，不读画面。</p>
+<figure class="diagram"><svg viewBox="0 0 960 300" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, PingFang SC, sans-serif" font-size="14">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#5d6670"/></marker></defs>
+<rect x="20" y="30" width="170" height="70" rx="8" fill="#f2efe8" stroke="#8a8f96"/><text x="105" y="60" text-anchor="middle">关卡碰撞</text><text x="105" y="82" text-anchor="middle" font-size="12" fill="#5d6670">Smoke 通道 / SmokePass 标签</text>
+<rect x="240" y="30" width="170" height="70" rx="8" fill="#f2efe8" stroke="#8a8f96"/><text x="325" y="60" text-anchor="middle">关卡体素</text><text x="325" y="82" text-anchor="middle" font-size="12" fill="#5d6670">50 cm，0 空气 1 实心 2 可穿</text>
+<rect x="460" y="30" width="190" height="70" rx="8" fill="#fde7d6" stroke="#b9551f"/><text x="555" y="60" text-anchor="middle">填充（服务器）</text><text x="555" y="82" text-anchor="middle" font-size="12" fill="#5d6670">起爆点 + 规则 → 32³ 到达距离</text>
+<rect x="700" y="30" width="240" height="70" rx="8" fill="#fde7d6" stroke="#b9551f"/><text x="820" y="60" text-anchor="middle">复制</text><text x="820" y="82" text-anchor="middle" font-size="12" fill="#5d6670">压缩结果 ~600 B，或只发输入 24 B</text>
+<rect x="460" y="170" width="190" height="80" rx="8" fill="#dcefe9" stroke="#17706b"/><text x="555" y="198" text-anchor="middle">事件缓冲（复制）</text><text x="555" y="220" text-anchor="middle" font-size="12" fill="#5d6670">子弹 16 条 · 高爆 5 个</text><text x="555" y="238" text-anchor="middle" font-size="12" fill="#5d6670">各带服务器时间戳</text>
+<rect x="700" y="150" width="240" height="56" rx="8" fill="#dcefe9" stroke="#17706b"/><text x="820" y="174" text-anchor="middle">GPU：光照缓存 → 步进 → 合成</text><text x="820" y="194" text-anchor="middle" font-size="12" fill="#5d6670">画面，噪声只削边缘</text>
+<rect x="700" y="220" width="240" height="56" rx="8" fill="#dcefe9" stroke="#17706b"/><text x="820" y="244" text-anchor="middle">CPU：沿线积分密度</text><text x="820" y="264" text-anchor="middle" font-size="12" fill="#5d6670">哨兵视线、相关性剔除</text>
+<path d="M190 65H236M410 65H456M650 65H696" stroke="#5d6670" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M820 100V146" stroke="#5d6670" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M650 200H696M650 228L696 246" stroke="#5d6670" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M940 100C955 140 955 220 942 246" stroke="#5d6670" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<text x="20" y="160" font-size="13" fill="#5d6670">橙色：只在服务器上算、需要权威</text>
+<text x="20" y="182" font-size="13" fill="#5d6670">绿色：各端按同一份数据和共享时间现算</text>
+</svg><figcaption>场只算一次，画面和玩法读同一份场；子弹和爆炸只是带时间戳的事件，不改场。</figcaption></figure>
+<p>模块对应关系：<code>SLVoxel</code>（关卡体素与三种填充，纯 C++）、<code>ASLSmoke</code>（每颗烟一个复制 Actor）、<code>ASLSmokeManager</code>（槽位、事件缓冲、CPU 密度查询、向渲染器提交每帧数据）、<code>SmokeLabShaders</code> 模块（<code>FSLSmokeRenderer</code> 场景视图扩展与 <code>Shaders/SmokeLab.usf</code>）、<code>ASLBot</code>（视线与相关性剔除）。</p>
+
+<h2 id="s2">2. 什么走网络</h2>
+<table>
+<tr><th>数据</th><th>载体</th><th>何时</th><th>内容</th></tr>
+<tr><td>烟雾输入</td><td><code>ASLSmoke</code> 的 <code>Detonation</code>、<code>Rule</code>、<code>Sync</code>、<code>Version</code>、<code>StartTime</code>、<code>Bit</code></td><td>起爆、重新填充时</td><td>起爆点、扩散规则、同步方式、版本号、服务器起爆时刻、槽位位号，约 24 字节</td></tr>
+<tr><td>烟雾结果</td><td><code>ASLSmoke::Packed</code> + <code>GridOrigin</code> + <code>ServerFieldCrc</code></td><td>同上，仅“服务器下发结果”模式</td><td>zlib 压缩的 32³ 到达距离（实测 634 字节）、网格原点、服务器的 CRC32</td></tr>
+<tr><td>子弹事件</td><td><code>ASLSmokeManager::Bullets</code></td><td>穿过烟雾包围盒的射击</td><td>起点、终点、服务器时间、半径系数；最多 16 条，先进先出</td></tr>
+<tr><td>高爆事件</td><td><code>ASLSmokeManager::Blasts</code></td><td>爆炸时</td><td>位置、服务器时间、受影响烟雾的位掩码；最多 5 个</td></tr>
+<tr><td>共享开关</td><td><code>ASLSmokeManager::Settings</code></td><td>变化时</td><td>扩散规则、同步方式、子弹 / 高爆 / 回填开关、相关性剔除、哨兵开火</td></tr>
+</table>
+<p>不走网络但各端一致的东西：关卡体素（各端开局自己算）、生长半径与消散（<code>StartTime</code> 加共享时间）、子弹通道和高爆清空区的形状（事件时间戳加共享时间）。时间统一用 <code>GameState-&gt;GetServerWorldTimeSeconds()</code>。</p>
+
+<h2 id="s3">3. 关卡体素化</h2>
+<p>开局时 <code>FSLVoxelWorld::Build</code> 对整张地图（本工程 104 × 72 × 12 格）逐格做盒体重叠检测，约 50 ms：</p>
+<ul>
+<li>新建一个碰撞通道 <code>Smoke</code>（<code>DefaultEngine.ini</code> 里 <code>ECC_GameTraceChannel1</code>，默认 Block）。墙、地面、箱子挡它；角色胶囊体设为 Ignore，否则烟会把人当成墙绕开。</li>
+<li>带 <code>SmokePass</code> 标签的 Actor（铁栅、通风口）记为 2：烟可以穿过，但它仍然挡视线和子弹。</li>
+<li>格子外：上方和四周视为空气，下方视为实心，所以烟不会从地图边缘以下漏出去。</li>
+<li>门开关后只对门附近的区域调用 <code>Rebuild</code>，再让包围盒碰到门的烟按原输入重新填充一次，版本号加一。</li>
+</ul>
+<p>渲染器另外拿到一份只有 0 / 1 的 <code>SolidMask</code>，作为 3D 纹理用于太阳遮挡和天空可见度。</p>
+
+<h2 id="s4">4. 扩散：到达距离场</h2>
+<p>每颗烟有一个 32³ 的局部网格，网格原点 = 起爆体素 − (16, 16, 4)，所以烟可以向上长 28 格、向下 4 格。手雷卡在缝里时，在 2 格内找最近的空气体素作为起点，找不到就不起烟。场里每格存一个字节：到达距离（体素）× 8，255 表示没有烟。</p>
+<figure class="diagram"><svg viewBox="0 0 960 250" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, PingFang SC, sans-serif" font-size="14">
+<g transform="translate(20,20)">
+<text x="140" y="0" text-anchor="middle" dy="4">A 椭球裁剪</text>
+<ellipse cx="140" cy="110" rx="120" ry="80" fill="#cfd8dc" stroke="#78909c"/>
+<rect x="175" y="25" width="10" height="170" fill="#6d4c41"/>
+<circle cx="110" cy="130" r="6" fill="#b9551f"/>
+<text x="140" y="215" text-anchor="middle" font-size="12" fill="#5d6670">墙后同样填满：烟穿墙</text>
+</g>
+<g transform="translate(330,20)">
+<text x="140" y="0" text-anchor="middle" dy="4">B 测地填充</text>
+<path d="M20 110A120 80 0 0 1 175 34V186A120 80 0 0 1 20 110Z" fill="#cfd8dc" stroke="#78909c"/>
+<ellipse cx="140" cy="110" rx="120" ry="80" fill="none" stroke="#78909c" stroke-dasharray="4 4"/>
+<rect x="175" y="25" width="10" height="170" fill="#6d4c41"/>
+<circle cx="110" cy="130" r="6" fill="#b9551f"/>
+<text x="140" y="215" text-anchor="middle" font-size="12" fill="#5d6670">只走连通的空气，墙后的体积直接丢失</text>
+</g>
+<g transform="translate(640,20)">
+<text x="150" y="0" text-anchor="middle" dy="4">C 体积守恒（采用）</text>
+<path d="M0 110A130 92 0 0 1 175 22V198A130 92 0 0 1 0 110Z" fill="#cfd8dc" stroke="#78909c"/>
+<ellipse cx="140" cy="110" rx="120" ry="80" fill="none" stroke="#78909c" stroke-dasharray="4 4"/>
+<rect x="175" y="15" width="10" height="190" fill="#6d4c41"/>
+<circle cx="110" cy="130" r="6" fill="#b9551f"/>
+<text x="150" y="225" text-anchor="middle" font-size="12" fill="#5d6670">按距离由近及远填满固定体积，被挡住的部分补到空地上</text>
+</g>
+</svg><figcaption>同一颗烟贴着薄墙起爆。虚线是自由空间里的椭球（水平半径 7.5 格，竖直半径 4.5 格，中心在起点上方 2 格）。</figcaption></figure>
+<table>
+<tr><th>规则</th><th>算法</th><th>到达距离</th><th>特点</th></tr>
+<tr><td>A 椭球裁剪</td><td>椭球内所有非实心体素</td><td>到起点的椭球度量距离</td><td>最便宜；顺带用 BFS 统计“漏出”体素数</td></tr>
+<tr><td>B 测地填充</td><td>6 邻域 BFS，限制在椭球内</td><td>BFS 步数</td><td>不穿墙，但被挡住的体积就没了，贴墙的烟很薄</td></tr>
+<tr><td>C 体积守恒</td><td>26 邻域整数倒角 Dijkstra，桶队列，直到填满 <code>OpenVolume()</code> 个体素</td><td>Dijkstra 距离</td><td>走廊里沿着走廊延伸，房间里自然铺开；结果确定</td></tr>
+</table>
+<pre><code>// 规则 C 的核心（SLVoxel.cpp）
+Budget = OpenVolume();                       // 开阔地面上椭球能装下的体素数，常数
+Cost[dz][dy][dx] = round(10 · sqrt(dx² + dy² + (dz · RadiusXY/RadiusZ)²))   // 整数，竖直更贵
+从起点开始按桶序号（距离 ×10）出队：
+    记录到达距离 = 桶号 / 10，Filled++，到 Budget 就停
+    对 26 个邻居：跳过实心；斜向一步要求它分解出的每个轴向步都是空气（不准切墙角）
+                 新距离 &lt; 旧距离 就放进对应的桶</code></pre>
+<ul>
+<li><strong>为什么用整数代价和桶队列</strong>：浮点距离加优先队列在不同编译器、不同 CPU 上可能出队顺序不同，填出的场就不一样；“只发输入”模式下各端各自填充，必须逐位一致。整数代价配固定的邻居遍历顺序，结果只取决于关卡体素。</li>
+<li><strong>为什么竖直代价更高</strong>：比例取椭球的水平 / 竖直半径之比，开阔地面上填出来的形状就是那个椭球，和规则 A 一致。</li>
+<li>一次填充 0.3–0.7 ms（955 个体素）。可以放到任务线程里，本工程直接在游戏线程上做。</li>
+</ul>
+
+<h2 id="s5">5. 生长、消散与上传</h2>
+<p>场不随时间变，变的是“可见半径”。<code>ASLSmoke::Radius(t)</code>：</p>
+<pre><code>x      = clamp(age / 1.6 s, 0, 1)           // 慢放生长时 ×4
+R(t)   = (MaxDist + 1.5) · (1 − (1 − x)³)    // 先快后慢
+寿命最后 2.5 s：R ×= 0.35 + 0.65 · tail，密度 ×= tail     // 从外向里收缩并变淡，寿命 18 s
+着色器：density = saturate((R − arrival) / feather) · fade，feather = 2 格</code></pre>
+<p>到达距离小的体素先出现，所以生长、消散天然沿着扩散路径：走廊里的烟会一节一节地往前推，门后的烟最后出现、最先消失。</p>
+<p>上传到 GPU 前做两圈软膨胀：烟外侧一圈空气体素写入“最近烟体素的到达距离 + 12”（1.5 格），两圈后停止，不写进实心体素。这样三线性过滤在烟的边缘得到一段渐变，而不是体素台阶。所有烟共用一张 <code>542 × 32 × 32</code> 的 R8 三维图集，16 个槽位，x 方向每槽相隔 34 格，中间留 2 格空隙防止过滤串到隔壁槽。</p>
+
+<h2 id="s6">6. 子弹与高爆：事件挖空</h2>
+<p>子弹和爆炸不改场，只在“当前时刻”的密度上乘一个系数。CPU 的 <code>ASLSmokeManager::DensityAt</code> 和着色器的 <code>Density</code> 用同一套公式，玩法与画面一致。</p>
+<pre><code>// 子弹（每条：起点 S、终点 E、age = (t − t0) / 1.6 s、半径系数 k）
+r       = 到线段 SE 的距离 · 0.05 / 2.54 · k        // 20 Hammer 单位（约 51 cm）处 r = 1
+nearEnd = 1 − saturate(到 E 的距离 / 254 cm)          // 弹着点附近 2.5 m 逐渐闭合
+carve   = smoothstep(0, 0.5, 1 − saturate(age + saturate(r + nearEnd)))
+density = lerp(density, −0.05, carve)                // 中心清到 0，随 age 收拢
+
+// 高爆（每个：位置 B、age = t − t0 秒、位掩码）
+pulse   = (1 − smoothstep(0, 2, age))^128            // 冲击前沿
+k       = smoothstep(200u, 240u, |P − B| + pulse · 250u) + (回填 ? smoothstep(0.5, 5, age)^1.8 : 0)
+density ×= lerp(0.02, 1, saturate(k))                // 200 单位（约 5 m）内清到 2%</code></pre>
+<ul>
+<li><strong>只记录穿过烟的射击</strong>：服务器先用线段和烟雾包围盒求交，不相交的射击不进缓冲，16 条够用。</li>
+<li><strong>本地预测</strong>：开枪的客户端立即把自己的子弹放进 <code>LocalBullets</code>，服务器的同一发到达后（同一射手、落点相差 50 cm 以内）去掉本地副本，所以开枪即刻看到通道。</li>
+<li><strong>高爆位掩码</strong>：对爆点 250 单位范围内的每颗烟，服务器从爆点向那颗烟的起爆点上方 80 cm 做一次 <code>Smoke</code> 通道射线检测；没被挡住，或者爆点本身就在烟里，才把这颗烟的位加进掩码。墙后的烟不受影响（CS2 修过“高爆隔墙推开烟雾”的问题）。掩码随事件复制，客户端不需要再做检测。</li>
+<li><strong>通道中心必须清到 0</strong>：15 m 厚的烟里残留 5% 的密度仍然不透明。曲线用 <code>smoothstep(0, 0.5, ·)</code>，中心完全清空，再随 age 收窄。</li>
+</ul>
+
+<h2 id="s7">7. 渲染管线</h2>
+<p><code>FSLSmokeRenderer</code> 继承 <code>FWorldSceneViewExtension</code>，在 <code>PrePostProcessPass_RenderThread</code> 里用 RDG 插入三个通道，结果预乘混合进场景颜色，排在色调映射之前，所以自动跟随曝光。游戏线程每帧用 <code>SetFrame</code> 提交一份 <code>FSLRenderFrame</code>（烟雾列表、事件、灯光、开关），渲染线程拷贝后使用。</p>
+<figure class="diagram"><svg viewBox="0 0 960 170" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, PingFang SC, sans-serif" font-size="14">
+<defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#5d6670"/></marker></defs>
+<rect x="20" y="30" width="200" height="90" rx="8" fill="#f2efe8" stroke="#8a8f96"/><text x="120" y="58" text-anchor="middle">LightCS</text><text x="120" y="80" text-anchor="middle" font-size="12" fill="#5d6670">每体素一次入射光</text><text x="120" y="98" text-anchor="middle" font-size="12" fill="#5d6670">约 0.1 ms</text>
+<rect x="270" y="30" width="200" height="90" rx="8" fill="#f2efe8" stroke="#8a8f96"/><text x="370" y="58" text-anchor="middle">MarchCS</text><text x="370" y="80" text-anchor="middle" font-size="12" fill="#5d6670">1/4 分辨率，步长 10 cm</text><text x="370" y="98" text-anchor="middle" font-size="12" fill="#5d6670">约 0.3–0.5 ms</text>
+<rect x="520" y="30" width="200" height="90" rx="8" fill="#f2efe8" stroke="#8a8f96"/><text x="620" y="58" text-anchor="middle">CompositePS</text><text x="620" y="80" text-anchor="middle" font-size="12" fill="#5d6670">4×4 深度感知上采样</text><text x="620" y="98" text-anchor="middle" font-size="12" fill="#5d6670">对不上的像素全分辨率补步进</text>
+<rect x="770" y="30" width="170" height="90" rx="8" fill="#dcefe9" stroke="#17706b"/><text x="855" y="70" text-anchor="middle">SceneColor</text><text x="855" y="92" text-anchor="middle" font-size="12" fill="#5d6670">One, InvSrcAlpha</text>
+<path d="M220 75H266M470 75H516M720 75H766" stroke="#5d6670" stroke-width="1.6" marker-end="url(#b)"/>
+<text x="20" y="150" font-size="12" fill="#5d6670">输入：图集（到达距离）、光照缓存、64³ 噪声纹理、关卡实心体素、场景深度。三个通道前后各插一个时间戳查询，4 帧环形读回。</text>
+</svg><figcaption>RTX 3060，1600×900，1/4 分辨率步进加噪声纹理时三个通道合计约 1 ms。</figcaption></figure>
+<h3>光照缓存（LightCS）</h3>
+<pre><code>Incident(P) = Sky · (1 − 0.45·D) · lerp(0.18, 1, SkyVisibility(P))
+            + Sun · MS(SelfShadow(P)) · WorldSunVisibility(P)
+            + Σ 灯光 · 窗函数 / d² · MS(沿灯方向 4 步的烟透射)
+SelfShadow  = exp(−1.1 · Σ 朝太阳 6 步、每步 50 cm 的密度)
+MS(T)       = T + 0.3 · T^0.2          // 多次散射近似：厚烟内部保持灰白，不发黑也不被灯光染色
+SkyVisibility：天顶和 4 个 45° 方向各在关卡体素里走 10 格，按开阔程度加权
+WorldSunVisibility：朝太阳在关卡体素里走 16 格</code></pre>
+<p>结果写进与图集同布局的 <code>PF_FloatRGBA</code> 三维纹理。步进时按各烟的基础密度加权读取，每个样本不再朝光源步进。面板的“逐采样阴影射线”把这一步挪进步进循环，作为对照：画面相近，耗时成倍增加。</p>
+<h3>步进（MarchCS）</h3>
+<ul>
+<li>先用所有烟的包围盒和射线求交，只在 [进入, 离开] 区间里步进，终点截到场景深度前 2 cm。步长 10 cm，最多 320 步，透明度到 0.995 提前退出，消光系数 σ = 0.035 / cm。</li>
+<li>起点按交错梯度噪声（IGN）抖动半个步长以内，消除分层条纹。抖动留下的颗粒由合成通道的宽滤波吃掉。</li>
+<li>细节噪声：64³ 的 RG8 纹理（CPU 上生成两层 Worley），先做一次低频的采样位置扰动（幅度 0.9 格），再乘一层侵蚀。<strong>玩法密度下限</strong>开启时，侵蚀只作用在离表面 3 格以内的边缘带，烟芯永远不被噪声削透。</li>
+<li>噪声坐标必须是世界坐标。着色器拿到的都是 translated world（世界坐标 + PreViewTranslation），直接拿它采噪声，细节会跟着镜头滑动。传入 <code>PreViewTranslation</code> 先减回去。</li>
+</ul>
+<h3>合成（CompositePS）</h3>
+<p>每个全分辨率像素取周围 4×4 个低分辨率样本，权重 = 半径 1.5 的帐篷函数 × exp(−40 · 相对深度差)。如果没有一个样本的深度和本像素相差 4% 以内（墙角、枪管边缘），就在这个像素上用全分辨率重新步进一次（CS2 的 full-res pass）。帐篷比双线性宽，1/4 分辨率下的抖动不会放大成 4×4 像素的网点。</p>
+
+<h2 id="s8">8. 玩法遮挡与哨兵视线</h2>
+<p><code>ASLSmokeManager::SmokeLength(A, B)</code> 只在线段穿过烟雾包围盒的那一段上，每 20 cm 采一次无噪声的密度（含子弹与高爆挖空），累加“等效满密度长度”。哨兵的判定：</p>
+<ol>
+<li>距离 50 m 内、在视野里（当前朝向 ±65°，或岗位朝向 ±70°）。</li>
+<li>对胸口和头部做 Visibility 射线检测，任一点没被几何挡住。</li>
+<li>那条视线上的烟长度 &lt; 250 cm（<code>BotSmokeBlockCm × 0.5</code>）。CS2 的机器人用 <code>bot_max_visible_smoke_length 200</code>（Hammer 单位）。</li>
+</ol>
+<p>因为这里不读画面，关掉“绘制烟雾”后哨兵照样看不见你；不同画质、不同显卡、开不开噪声，都得到同一个判定。</p>
+
+<h2 id="s9">9. 同步与相关性剔除</h2>
+<h3>两种同步方式</h3>
+<table>
+<tr><th></th><th>服务器下发结果（默认）</th><th>只发输入，各自填充</th></tr>
+<tr><td>每颗烟的流量</td><td>24 + 约 610 字节，只发一次</td><td>24 字节</td></tr>
+<tr><td>客户端计算</td><td>解压</td><td>完整填充一次</td></tr>
+<tr><td>一致性前提</td><td>无</td><td>各端关卡体素与填充代码逐位一致</td></tr>
+<tr><td>门、可破坏物</td><td>服务器重算后重发</td><td>每端都要在同一时刻看到同样的关卡变化</td></tr>
+</table>
+<p>两种方式下服务器都复制自己结果的 CRC32（<code>ServerFieldCrc</code>），客户端拿本地场的 CRC 比对，界面上显示“与服务器不一致 N 颗”。面板的“本机关卡数据差异”让这台客户端把铁栅当成实心，用来演示只发输入时一处关卡差异就能让两端的烟不一样；CS2 在 2024 年 10 月改为下发结果，也是出于同样的原因。</p>
+<h3>相关性剔除</h3>
+<pre><code>bool ASLBot::IsNetRelevantFor(RealViewer, ViewTarget, SrcLocation)
+    未开启 / 已死亡 / 本地控制器 → 引擎默认
+    hidden = SmokeHides(SrcLocation)       // 头、胸、脚，加 0.25 s 后的预测位置，6 个点都在 ≥ 250 cm 的烟后
+    不 hidden → RelevantUntil[viewer] = now + 0.5 s
+    now &lt; RelevantUntil → 引擎默认，否则 false</code></pre>
+<ul>
+<li>判定偏乐观：只有 6 个探测点全部被烟挡住才剔除，宁可多发也不要让对手在烟边缘“闪现”。几何遮挡交给引擎原有规则，这里只管烟。</li>
+<li>0.5 s 迟滞防止烟边缘来回切换。<code>NetDriver</code> 的 <code>RelevantTimeout</code> 调成 0.6 s，不相关的 Actor 通道才会及时关闭；默认值 5 s 时演示看不出效果。</li>
+<li>本工程关闭了 Iris（<code>net.Iris.UseIrisReplication=0</code>），<code>IsNetRelevantFor</code> 走传统复制路径。使用 Iris 的项目要改写成过滤器（<code>UNetObjectFilter</code>）。</li>
+</ul>
+<p>自测里客户端站在中路，在自己和两名哨兵之间起一颗烟后，客户端上的 <code>ASLBot</code> 从 3 个变成 1 个；透视视角只能画出它真正收到的那一个。</p>
+
+<h2 id="s10">10. 射击：枪口与瞄准点</h2>
+<pre><code>AimDir   = VRandCone(镜头朝向, 扩散角)           // 扩散 = 0.35° + 移动 2.4° + 后坐
+AimPoint = 镜头沿 AimDir 的射线检测命中点（或 120 m 处）
+Start    = 第一人称枪模的枪口                    // Rifle1P 局部 (0, 55, 10)
+End      = 枪口到 AimPoint 的射线检测命中点
+本地：曳光 + 预测通道（Start → End）；服务器：ServerFire(Start, Dir)，起点离眼睛超过 1.5 m 时改用眼睛</code></pre>
+<p>这是常规 FPS 的做法：准星决定打哪里，子弹从枪口出来。烟里的通道也是枪口到落点这一段，所以从玩家视角看，通道从右下方斜着通向准星。其他人看到的曳光从第三人称枪模的枪口出发。</p>
+
+<h2 id="s11">11. 测量与自测</h2>
+<p>RTX 3060，1600 × 900：1/4 分辨率加噪声纹理时步进约 0.5 ms、光照缓存约 0.1 ms、合成约 0.3 ms，整帧约 9 ms；全分辨率加程序化噪声时步进约 7–8 ms。</p>
+<p><code>powershell -File Tools/iterate.ps1 [-Assets] [-Net]</code> 编译后离屏运行自测，全部通过注入的键鼠事件完成，结果写进 <code>Saved/Capture/*_results.txt</code>：</p>
+<ul>
+<li>主机 13 项：起烟、GPU 计时、子弹通道（枪线上的烟 920 cm → 约 80 cm）、高爆清空与回填（0.02 → 5 s 后 1.00）、A 规则漏烟、C 规则不漏、哨兵在中路看见我、烟挡住哨兵（视线上 860 cm）、开门后烟流过门口、安放炸弹、1/4 分辨率更便宜、帧时间。</li>
+<li>主机 + 客户端 5 项：下发结果的 CRC 一致、只发输入时注入差异能被检测出、相关性剔除、关闭剔除后恢复、客户端帧时间。</li>
+</ul>
+
+<h2 id="s12">12. 坑点清单</h2>
+<ul>
+<li><strong>噪声在 translated world 里采样</strong>：细节跟着镜头滑动。先减去 <code>PreViewTranslation</code>。</li>
+<li><strong>灯光单位不一致</strong>：C++ 里新建的点光源默认是无单位亮度。着色器若按坎德拉理解同一个数，烟比墙亮几十倍。设 <code>IntensityUnits = ELightUnits::Candelas</code>。</li>
+<li><strong>灯光不被烟衰减</strong>：太阳有自阴影而灯没有时，厚烟内部和子弹通道的内壁会被灯光染成暖黄色。灯光也要走几步透射，再配合多次散射近似。</li>
+<li><strong>通道没清到 0</strong>：残留 5% 的密度在厚烟里照样不透明，通道看不穿。</li>
+<li><strong>浮点 Dijkstra</strong>：出队顺序可能因平台而异，只发输入时两端填出不同的烟。用整数代价加桶队列。</li>
+<li><strong>斜向穿墙角</strong>：26 邻域如果不检查分解出的轴向步，烟会从两块墙板的对角缝里漏过去。</li>
+<li><strong>体素台阶</strong>：直接用最近体素采样或不做软膨胀，边缘是一级级的方块。三线性过滤加两圈软膨胀、2 格羽化，再加一次低频的采样位置扰动。</li>
+<li><strong>低分辨率网点</strong>：IGN 抖动在 1/4 分辨率下会放大成 4×4 网点，上采样要用比双线性更宽的滤波。</li>
+<li><strong>相关性剔除不生效</strong>：<code>RelevantTimeout</code> 默认 5 s；Iris 开启时 <code>IsNetRelevantFor</code> 不被调用。</li>
+<li><strong>天光实时捕获</strong>：运行时创建的 <code>SkyLightComponent</code> 要在 <code>RegisterComponent</code> 之前设好 <code>bRealTimeCapture</code>，否则阴影里一片漆黑。</li>
+<li><strong>截图与状态切换在同一帧</strong>：截图拿到的是整个游戏 Tick 之后渲染的那一帧，同一步里的开关变化会出现在截图里。自测脚本把状态切换放到截图后的下一步。</li>
+<li><strong>F1–F12 被引擎占用</strong>：在 <code>DefaultInput.ini</code> 里写 <code>!DebugExecBindings=ClearArray</code>。</li>
+</ul>
+
+<h2 id="s13">13. 移植清单</h2>
+<ol>
+<li>加一个 <code>Smoke</code> 碰撞通道，给能透烟的物体打 <code>SmokePass</code> 标签，角色胶囊体对它设 Ignore。</li>
+<li>拷贝 <code>SLVoxel.h/.cpp</code>（纯 C++）。按自己的单位调 <code>SL::VoxelCm</code>、椭球半径和寿命；开局对地图调用 <code>Build</code>，可破坏物或门变化时对局部调用 <code>Rebuild</code>。</li>
+<li>烟雾 Actor：服务器填充，按需要选“下发结果”或“只发输入”，复制 CRC 以便检查一致性。</li>
+<li>拷贝 <code>SmokeLabShaders</code> 模块（<code>SLRender.h/.cpp</code> + <code>Shaders/SmokeLab.usf</code>），模块加载阶段设为 <code>PostConfigInit</code>，在 <code>StartupModule</code> 里映射 <code>/SmokeLab</code> 着色器目录。每帧由游戏线程提交烟雾列表、事件与灯光。</li>
+<li>子弹、爆炸：服务器写带时间戳的事件数组，客户端预测自己的子弹；着色器和 CPU 查询共用同一套挖空公式。</li>
+<li>玩法：所有“能不能看见”的判定都调用 <code>SmokeLength</code>，不要读画面。需要防透视时，再把 <code>IsNetRelevantFor</code> 接上同一个查询。</li>
+<li>回归测试：跑 <code>iterate.ps1 -Net</code>，重点看 CRC 一致、烟挡视线和步进耗时三项。</li>
+</ol>
+</main></div></body></html>
