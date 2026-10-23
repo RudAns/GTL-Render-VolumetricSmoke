@@ -165,15 +165,32 @@ void ASLFx::Tracer(UWorld* W, const FVector& A, const FVector& B, bool bBot)
 	if (L < 10.f) return;
 	FActorSpawnParameters P;
 	P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	// a short streak somewhere along the path, like a real tracer frame
-	const float Seg = FMath::Min(L, 450.f);
-	const float Off = FMath::FRandRange(0.f, FMath::Max(L - Seg, 0.f) * 0.35f);
-	const FVector S0 = A + D / L * Off;
-	ASLFx* F = W->SpawnActor<ASLFx>((S0 + S0 + D / L * Seg) * 0.5f, FRotationMatrix::MakeFromZ(D).Rotator(), P);
+	// the streak leaves the muzzle and flies to the impact at tracer speed (much slower than a real round, so the
+	// eye can follow it), with a brief muzzle flash
+	ASLFx* F = W->SpawnActor<ASLFx>(A, FRotationMatrix::MakeFromZ(D).Rotator(), P);
 	if (!F) return;
-	F->Mesh->SetWorldScale3D(FVector(0.012f, 0.012f, Seg / 100.f));
 	if (UMaterialInterface* M = Find<UMaterialInterface>(TEXT("/Game/SmokeLab/Materials/M_Tracer.M_Tracer"))) F->Mesh->SetMaterial(0, M);
-	F->Life = 0.06f;
+	F->From = A; F->Dir = D / L; F->Length = L;
+	F->Streak = FMath::Min(L, 300.f);
+	F->Speed = 15000.f;
+	F->Life = FMath::Min((L + F->Streak) / F->Speed, 0.4f);
+	F->PlaceStreak();
+	F->Light->SetVisibility(true);
+	F->Light->SetLightColor(FLinearColor(1.f, 0.75f, 0.4f));
+	F->Light->SetAttenuationRadius(450.f);
+	F->BaseIntensity = bBot ? 6000.f : 2500.f;
+	F->Light->SetIntensity(F->BaseIntensity);
+}
+
+void ASLFx::PlaceStreak()
+{
+	const float Head = FMath::Min(Age * Speed + Streak, Length);
+	const float Tail = FMath::Clamp(Head - Streak, 0.f, Length);
+	const float Seg = FMath::Max(Head - Tail, 1.f);
+	Mesh->SetWorldLocation(From + Dir * (Tail + Seg * 0.5f));
+	Mesh->SetWorldScale3D(FVector(0.018f, 0.018f, Seg / 100.f));
+	Mesh->SetVisibility(Head - Tail > 2.f);
+	Light->SetWorldLocation(From);	// the flash stays at the muzzle while the streak flies on
 }
 
 void ASLFx::Blast(UWorld* W, const FVector& At)
@@ -196,6 +213,12 @@ void ASLFx::Tick(float Dt)
 {
 	Super::Tick(Dt);
 	Age += Dt;
-	if (BaseIntensity > 0.f) Light->SetIntensity(BaseIntensity * FMath::Square(FMath::Clamp(1.f - Age / Life, 0.f, 1.f)));
+	if (Speed > 0.f)
+	{
+		PlaceStreak();
+		// the flash lasts 40 ms however long the tracer flies
+		Light->SetIntensity(BaseIntensity * FMath::Square(FMath::Clamp(1.f - Age / 0.04f, 0.f, 1.f)));
+	}
+	else if (BaseIntensity > 0.f) Light->SetIntensity(BaseIntensity * FMath::Square(FMath::Clamp(1.f - Age / Life, 0.f, 1.f)));
 	if (Age > Life) Destroy();
 }

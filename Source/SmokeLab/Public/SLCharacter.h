@@ -22,8 +22,8 @@ public:
 	bool IsDead() const { return Health <= 0.f; }
 	FVector EyeLocation() const;
 	FVector ChestLocation() const { return GetActorLocation() + FVector(0, 0, 30); }
-	/** Muzzle of the third-person rifle (world). */
-	FVector MuzzleLocation() const;
+	/** Muzzle of the rifle this machine shows for the soldier (world): the first-person one for my own character. */
+	virtual FVector MuzzleLocation() const;
 	void PlayFireFx(const FVector& End);	// tracer + sound on this machine
 
 	UPROPERTY(ReplicatedUsing = OnRep_Health) float Health = 100.f;
@@ -63,6 +63,7 @@ public:
 	virtual void Tick(float Dt) override;
 	virtual void BeginPlay() override;
 	virtual void CalcCamera(float DeltaTime, struct FMinimalViewInfo& OutResult) override;
+	virtual FVector MuzzleLocation() const override;
 
 	// input (called by the controller)
 	void SetFiring(bool b) { bWantsFire = b; }

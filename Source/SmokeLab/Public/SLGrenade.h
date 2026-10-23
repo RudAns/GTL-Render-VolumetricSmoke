@@ -45,4 +45,8 @@ public:
 	UPROPERTY(VisibleAnywhere) TObjectPtr<class UPointLightComponent> Light;
 	UPROPERTY() TObjectPtr<class UMaterialInstanceDynamic> Mid;
 	float Life = 0.1f, Age = 0.f, BaseIntensity = 0.f;
+	// a moving tracer: a streak that leaves the muzzle and flies to the impact
+	FVector From = FVector::ZeroVector, Dir = FVector::ForwardVector;
+	float Length = 0.f, Streak = 0.f, Speed = 0.f;
+	void PlaceStreak();
 };

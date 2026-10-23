@@ -282,15 +282,27 @@ void ASLCharacter::Tick(float Dt)
 	}
 }
 
+FVector ASLCharacter::MuzzleLocation() const
+{
+	// my own view shows the first-person rifle; everyone else sees the third-person one in the hand
+	if (IsLocallyControlled() && Rifle1P) return Rifle1P->GetComponentTransform().TransformPosition(FVector(0, 55, 10));
+	return Super::MuzzleLocation();
+}
+
 void ASLCharacter::FireOnce()
 {
+	// Usual FPS split: the camera ray (with spread) decides what the crosshair is on, the bullet itself leaves the
+	// muzzle towards that point. A wall between the muzzle and the aim point stops it there.
 	FireCooldown = 0.1f;
 	const FRotator Aim = GetControlRotation();
-	const FVector Start = Camera->GetComponentLocation();
+	const FVector Eye = Camera->GetComponentLocation();
 	FRandomStream R(FMath::Rand());
-	const FVector Dir = R.VRandCone(Aim.Vector(), FMath::DegreesToRadians(Spread()));
+	const FVector AimDir = R.VRandCone(Aim.Vector(), FMath::DegreesToRadians(Spread()));
 	FHitResult Hit;
 	FCollisionQueryParams Q(SCENE_QUERY_STAT(SLFire), false, this);
+	const FVector AimPoint = GetWorld()->LineTraceSingleByChannel(Hit, Eye, Eye + AimDir * 12000.f, ECC_Visibility, Q) ? FVector(Hit.ImpactPoint) : Eye + AimDir * 12000.f;
+	const FVector Start = MuzzleLocation();
+	const FVector Dir = (AimPoint - Start).GetSafeNormal();
 	const FVector Far = Start + Dir * 12000.f;
 	const FVector End = GetWorld()->LineTraceSingleByChannel(Hit, Start, Far, ECC_Visibility, Q) ? Hit.ImpactPoint : Far;
 	// local presentation and the locally predicted tunnel (the server's copy replaces it)
@@ -303,9 +315,12 @@ void ASLCharacter::FireOnce()
 	ServerFire(Start, Dir);
 }
 
-void ASLCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector_NetQuantizeNormal Dir)
+void ASLCharacter::ServerFire_Implementation(FVector_NetQuantize InStart, FVector_NetQuantizeNormal Dir)
 {
 	if (IsDead() || Ammo <= 0) return;
+	// the client's first-person muzzle; accept it only near the eye
+	const FVector Eye = EyeLocation();
+	const FVector Start = FVector::Dist(InStart, Eye) < 150.f ? FVector(InStart) : Eye;
 	--Ammo;
 	FHitResult Hit;
 	FCollisionQueryParams Q(SCENE_QUERY_STAT(SLFire), false, this);

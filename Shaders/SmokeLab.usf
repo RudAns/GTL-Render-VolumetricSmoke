@@ -224,18 +224,40 @@ float SelfShadow(float3 P)
 	return exp(-Sum * 1.1);
 }
 
+// Sunlight reaching P: single scattering plus a weaker, slower-decaying lobe that stands in for multiple scattering
+// (the usual octave approximation for clouds), so the inside of a thick cloud stays a neutral grey instead of
+// going dark and taking the colour of whatever local light is nearest.
+float MultiScatter(float T)
+{
+	return T + 0.3 * pow(max(T, 1e-6), 0.2);
+}
+
+float SunTransmittance(float3 P)
+{
+	return MultiScatter(SelfShadow(P));
+}
+
 float3 Incident(float3 P, float D)
 {
 	const float3 Amb = SkyIlluminance * (1 - 0.45 * D) * lerp(0.18, 1, SkyVisibility(P));
 	float3 Local = 0;
 	for (uint L = 0; L < NumLights; ++L)
 	{
-		const float Dm = length(P - LightP[L].xyz) * 0.01;
-		const float Rr = Dm * 100 / LightP[L].w;
+		const float3 ToL = LightP[L].xyz - P;
+		const float Dc = length(ToL);
+		const float Dm = Dc * 0.01;
+		const float Rr = Dc / LightP[L].w;
 		const float Win = Square(saturate(1 - Rr * Rr * Rr * Rr));
-		Local += LightC[L].rgb * Win / max(Dm * Dm, 0.25);
+		if (Win <= 0) continue;
+		// the lamp is attenuated by the smoke between it and the voxel, like the sun; without this a lamp lights the
+		// inside of the cloud fully and tints every tunnel wall its colour
+		const float Seg = min(VoxelCm, Dc / 5);
+		float Sum = 0, Heat;
+		for (int K = 1; K <= 4; ++K)
+			Sum += Density(P + ToL / Dc * (K * Seg), false, Heat);
+		Local += LightC[L].rgb * Win / max(Dm * Dm, 0.25) * MultiScatter(exp(-Sum * 1.1 * Seg / VoxelCm));
 	}
-	return Amb + SunIlluminance * SelfShadow(P) * WorldSunVisibility(P) + Local;
+	return Amb + SunIlluminance * SunTransmittance(P) * WorldSunVisibility(P) + Local;
 }
 
 float3 Turbo(float X)

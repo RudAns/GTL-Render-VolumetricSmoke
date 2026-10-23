@@ -86,13 +86,20 @@ void ASLPlayerController::TickCapture(float Dt)
 					P->Check(Mg->GpuTimes.MarchMs > 0.f, TEXT("gpu_timers"), FString::Printf(TEXT("light %.2f march %.2f composite %.2f ms at %dx%d"), Mg->GpuTimes.LightMs, Mg->GpuTimes.MarchMs, Mg->GpuTimes.CompositeMs, Mg->GpuTimes.LowW, Mg->GpuTimes.LowH));
 					P->Shot(TEXT("01_corridor_ruleC")); } },
 				// 2. bullets carve tunnels through it
-				{ 7.9f, [](ASLPlayerController* P) { const FVector E = P->PlayerCameraManager->GetCameraLocation(), F = P->PlayerCameraManager->GetCameraRotation().Vector();
-					P->Metrics.Add(TEXT("tunnel_before"), P->GetManager()->SmokeLength(E, E + F * 1500.f)); } },
 				{ 8.0f, [](ASLPlayerController* P) { P->Hold(EKeys::LeftMouseButton, true); } },
+				{ 8.012f, [](ASLPlayerController* P) { P->Shot(TEXT("02a_tracer")); } },
+				{ 8.03f, [](ASLPlayerController* P) { P->Shot(TEXT("02b_tracer")); } },
 				{ 8.04f, [](ASLPlayerController* P) { P->Hold(EKeys::LeftMouseButton, false); } },
-				{ 8.35f, [](ASLPlayerController* P) { const FVector E = P->PlayerCameraManager->GetCameraLocation(), F = P->PlayerCameraManager->GetCameraRotation().Vector();
-					const float Cm = P->GetManager()->SmokeLength(E, E + F * 1500.f);
-					P->Check(Cm < P->Metrics[TEXT("tunnel_before")] * 0.3f, TEXT("bullet_tunnel"), FString::Printf(TEXT("smoke along the shot %.0f cm before, %.0f cm just after one round"), P->Metrics[TEXT("tunnel_before")], Cm));
+				{ 8.35f, [](ASLPlayerController* P) { const ASLSmokeManager* Mg = P->GetManager();
+					// the round leaves the first-person muzzle; compare the smoke along its path without and with carving
+					// on the host the predicted copy is dropped as soon as the authoritative event exists
+					const TArray<FSLBulletEvent>& L = Mg->Bullets.Num() ? Mg->Bullets : Mg->GetLocalBullets();
+					const bool bShot = L.Num() > 0;
+					const FSLBulletEvent B = bShot ? L.Last() : FSLBulletEvent();
+					const float Before = bShot ? Mg->SmokeLength(B.Start, B.End, false) : 0.f, After = bShot ? Mg->SmokeLength(B.Start, B.End, true) : 0.f;
+					const float FromEye = bShot ? FVector::Dist(B.Start, P->PlayerCameraManager->GetCameraLocation()) : 0.f;
+					P->Check(bShot && Before > 300.f && After < Before * 0.3f && FromEye > 10.f && FromEye < 120.f, TEXT("bullet_tunnel"),
+						FString::Printf(TEXT("round starts %.0f cm from the eye at the muzzle; smoke along its path %.0f cm uncarved, %.0f cm carved"), FromEye, Before, After));
 					P->Shot(TEXT("02_bullet_tunnels")); } },
 				// 3. an HE grenade clears it, then it refills
 				{ 9.5f, [](ASLPlayerController* P) { P->Look(0.f, 4.f); P->Press(EKeys::H); } },

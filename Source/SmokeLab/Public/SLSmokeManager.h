@@ -62,6 +62,7 @@ public:
 	void RebuildRegion(const FBox& Region);
 
 	const TArray<TWeakObjectPtr<ASLSmoke>>& GetSmokes() const { return Smokes; }
+	const TArray<FSLBulletEvent>& GetLocalBullets() const { return LocalBullets; }
 	void RegisterSmoke(ASLSmoke* S);
 	void UnregisterSmoke(ASLSmoke* S);
 	void SetInjectDiff(bool b);
