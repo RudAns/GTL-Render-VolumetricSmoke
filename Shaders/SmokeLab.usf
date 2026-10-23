@@ -1,0 +1,406 @@
+// Interactive volumetric smoke: lighting cache, ray march and composite.
+// All positions are translated world (world + PreViewTranslation), lengths in cm.
+
+#include "/Engine/Private/Common.ush"
+
+#define GRID_N 32
+#define SLOT_STRIDE 34
+#define ATLAS_W 542
+#define MAX_SMOKES 16
+#define MAX_BULLETS 16
+#define MAX_BLASTS 5
+#define HAMMER 2.54		// cm per Hammer unit: the CS2 constants below are converted with it
+
+// ---------------------------------------------------------------- shared parameters
+uint NumSmokes;
+float4 SmokeA[MAX_SMOKES];		// grid origin (TW), atlas slot
+float4 SmokeB[MAX_SMOKES];		// radius (voxels), feather (voxels), density, bit
+uint NumBullets;
+float4 BulletS[MAX_BULLETS];	// start (TW), age 0..1
+float4 BulletE[MAX_BULLETS];	// end (TW), radius scale k
+uint NumBlasts;
+float4 BlastP[MAX_BLASTS];		// position (TW), age (s)
+float4 BlastM[MAX_BLASTS];		// x = smoke bit mask
+uint NumLights;
+float4 LightP[6];		// position (TW), radius
+float4 LightC[6];		// colour * candela
+float VoxelCm;
+float Time;
+uint NoiseMode;					// 0 none, 1 procedural, 2 texture
+uint LightMode;					// 0 cache, 1 shadow ray, 2 unlit
+uint DebugView;					// 0 smoke, 1 arrival heat map, 2 cache only
+uint GameplayFloor;
+float3 SunDir;
+float3 SunIlluminance;
+float3 SkyIlluminance;
+float3 WorldOccOrigin;			// TW
+float3 WorldOccDim;
+float StepCm;
+uint MaxSteps;
+
+Texture3D<float> Atlas;
+Texture3D<float4> LightCache;
+Texture3D<float2> NoiseTex;
+Texture3D<float> WorldOcc;
+SamplerState LinearClamp;
+SamplerState LinearWrap;
+
+// ---------------------------------------------------------------- helpers
+float3 AtlasUVW(uint Slot, float3 G)	// G in voxel units 0..32
+{
+	G = clamp(G, 0.5, GRID_N - 0.5);
+	return float3((Slot * SLOT_STRIDE + G.x) / ATLAS_W, G.y / GRID_N, G.z / GRID_N);
+}
+
+// Arrival distance (voxels) at grid coordinate G of smoke I; large when empty.
+float Arrival(uint I, float3 G)
+{
+	const float E = Atlas.SampleLevel(LinearClamp, AtlasUVW((uint)SmokeA[I].w, G), 0);
+	return E * (255.0 / 8.0);
+}
+
+// Base density of smoke I (growth radius and edge feather), and how deep inside the cloud we are (0 edge .. 1 core).
+float BaseDensity(uint I, float3 P, out float Depth)
+{
+	const float3 G = (P - SmokeA[I].xyz) / VoxelCm;
+	Depth = 0;
+	if (any(G < 0.0) || any(G > GRID_N)) return 0;
+	const float A = Arrival(I, G);
+	const float R = SmokeB[I].x;
+	if (A > 31.0 || A > R) return 0;
+	Depth = saturate((R - A) / 3.0);
+	return saturate((R - A) / SmokeB[I].y) * SmokeB[I].z;
+}
+
+float Hash3(float3 C, out float3 H)
+{
+	float3 Q = frac(C * float3(0.1031, 0.11369, 0.13787));
+	Q += dot(Q, Q.yxz + 19.19);
+	H = frac(float3((Q.x + Q.y) * Q.z, (Q.x + Q.z) * Q.y, (Q.y + Q.z) * Q.x));
+	return H.x;
+}
+
+float Worley(float3 P)
+{
+	const float3 I = floor(P), F = frac(P);
+	float M = 1;
+	for (int Z = -1; Z <= 1; ++Z)
+	for (int Y = -1; Y <= 1; ++Y)
+	for (int X = -1; X <= 1; ++X)
+	{
+		const float3 O = float3(X, Y, Z);
+		float3 H; Hash3(I + O, H);
+		const float3 D = O + H - F;
+		M = min(M, dot(D, D));
+	}
+	return M;
+}
+
+// 0..1 detail value; scrolls upwards slowly so the cloud "boils".
+float NoiseValue(float3 P)
+{
+	const float3 Q = P * 0.01 - float3(0, 0, Time * 0.08);	// metres, rising
+	if (NoiseMode == 1)
+		return saturate((1 - Worley(Q * 0.55)) * 0.6 + (1 - Worley(Q * 1.6)) * 0.28 + 0.12);
+	const float2 N = float2(NoiseTex.SampleLevel(LinearWrap, Q * (0.55 / 4.0), 0).x, NoiseTex.SampleLevel(LinearWrap, Q * (1.6 / 4.0), 0).y);
+	return saturate(N.x * 0.6 + N.y * 0.28 + 0.12);
+}
+
+// Domain warp: billowy edges instead of voxel steps (sampling position pushed up to ~0.9 voxel).
+float3 WarpOffset(float3 P)
+{
+	const float3 Q = P * (0.01 * 0.32) - float3(0, 0, Time * 0.05);
+	const float A = NoiseTex.SampleLevel(LinearWrap, Q, 0).x;
+	const float B = NoiseTex.SampleLevel(LinearWrap, Q.yzx + 0.37, 0).y;
+	const float C = NoiseTex.SampleLevel(LinearWrap, Q.zxy + 0.71, 0).x;
+	return (float3(A, B, C) - 0.5) * 2.0;
+}
+
+// Bullet tunnels: CS2's curve (radius 20 units / k, closing as the age goes 0 -> 1), in cm.
+float BulletCarve(float3 P, out float3 PushDir)
+{
+	float C = 0;
+	PushDir = 0;
+	for (uint B = 0; B < NumBullets; ++B)
+	{
+		const float3 S = BulletS[B].xyz, E = BulletE[B].xyz;
+		const float3 SE = E - S, SP = P - S;
+		const float H = saturate(dot(SP, SE) / max(dot(SE, SE), 1));
+		const float R = saturate(length(SP - SE * H) * (0.05 / HAMMER) * BulletE[B].w);
+		if (R >= 1) continue;
+		const float NearEnd = 1 - saturate(length(P - E) * (0.01 / HAMMER));
+		// the core is cleared completely (through 15 m of smoke even 5% density stays opaque) and narrows with age
+		const float K = smoothstep(0, 0.5, 1 - saturate(BulletS[B].w + saturate(R + NearEnd)));
+		if (K > C) { C = K; PushDir = normalize(SE); }
+	}
+	return C;
+}
+
+// HE: cleared to 2% within 200 units, the cleared ball opens over ~0.2 s and refills from 0.5 to 5 s.
+float BlastFactor(float3 P, uint Bit)
+{
+	float M = 1;
+	for (uint B = 0; B < NumBlasts; ++B)
+	{
+		if ((((uint)BlastM[B].x) & (1u << Bit)) == 0) continue;
+		const float Age = BlastP[B].w;
+		const float D = length(P - BlastP[B].xyz);
+		if (D > 250 * HAMMER) continue;
+		const float Pulse = pow(1 - smoothstep(0, 2, Age), 128);
+		const float K = saturate(smoothstep(200 * HAMMER, 240 * HAMMER, D + Pulse * 250 * HAMMER) + pow(smoothstep(0.5, 5.0, Age), 1.8));
+		M = min(M, lerp(0.02, 1, K));
+	}
+	return M;
+}
+
+// Total density at P (all smokes, carving, detail noise). Depth = deepest core value among contributors.
+float Density(float3 P, bool bNoise, out float Heat)
+{
+	Heat = -1;
+	float D = 0;
+	float3 Push;
+	const float Carve = BulletCarve(P, Push);
+	const float3 PN = P + Push * pow(Carve, 3) * 50;
+	const float3 PW = (bNoise && NoiseMode != 0) ? PN + WarpOffset(PN) * (VoxelCm * 0.9) : P;
+	for (uint I = 0; I < NumSmokes; ++I)
+	{
+		float Depth;
+		float Di = BaseDensity(I, PW, Depth);
+		if (Di <= 0) continue;
+		Di *= BlastFactor(P, (uint)SmokeB[I].w);
+		if (bNoise && NoiseMode != 0)
+		{
+			const float N = saturate(NoiseValue(PN) * 1.8 - 0.35);
+			Di *= GameplayFloor ? lerp(N, 1.0, smoothstep(0.3, 1.0, Depth)) : N;
+		}
+		if (DebugView == 1)
+		{
+			const float3 G = (P - SmokeA[I].xyz) / VoxelCm;
+			Heat = max(Heat, Arrival(I, G) / max(SmokeB[I].x, 1));
+		}
+		D += Di;
+	}
+	D = D + (-0.05 - D) * Carve;
+	return saturate(D);
+}
+
+float WorldSolid(float3 P)
+{
+	const float3 G = (P - WorldOccOrigin) / VoxelCm;
+	if (any(G < 0) || any(G >= WorldOccDim)) return 0;
+	return WorldOcc.SampleLevel(LinearClamp, G / WorldOccDim, 0);
+}
+
+// Sun visibility through the level geometry (world voxel grid), 16 voxels towards the sun.
+float WorldSunVisibility(float3 P)
+{
+	float Occ = 0;
+	for (int K = 1; K <= 16; ++K)
+		Occ = max(Occ, WorldSolid(P + SunDir * (K * VoxelCm)));
+	return 1 - Occ;
+}
+
+// Fraction of the sky dome the level leaves open above P: five cones (zenith and four 45 degree tilts), each
+// marched up to 10 voxels through the world occupancy. A roof or a corridor dims the ambient term.
+float SkyVisibility(float3 P)
+{
+	const float3 Dirs[5] = { float3(0, 0, 1), float3(0.7071, 0, 0.7071), float3(-0.7071, 0, 0.7071), float3(0, 0.7071, 0.7071), float3(0, -0.7071, 0.7071) };
+	float Open = 0;
+	for (int I = 0; I < 5; ++I)
+	{
+		float Occ = 0;
+		for (int K = 1; K <= 10; ++K)
+			Occ = max(Occ, WorldSolid(P + Dirs[I] * (K * VoxelCm)));
+		Open += (1 - Occ) * (I == 0 ? 0.32 : 0.17);
+	}
+	return Open;
+}
+
+float SelfShadow(float3 P)
+{
+	float Sum = 0, Heat;
+	for (int K = 1; K <= 6; ++K)
+		Sum += Density(P + SunDir * (K * VoxelCm), false, Heat);
+	return exp(-Sum * 1.1);
+}
+
+float3 Incident(float3 P, float D)
+{
+	const float3 Amb = SkyIlluminance * (1 - 0.45 * D) * lerp(0.18, 1, SkyVisibility(P));
+	float3 Local = 0;
+	for (uint L = 0; L < NumLights; ++L)
+	{
+		const float Dm = length(P - LightP[L].xyz) * 0.01;
+		const float Rr = Dm * 100 / LightP[L].w;
+		const float Win = Square(saturate(1 - Rr * Rr * Rr * Rr));
+		Local += LightC[L].rgb * Win / max(Dm * Dm, 0.25);
+	}
+	return Amb + SunIlluminance * SelfShadow(P) * WorldSunVisibility(P) + Local;
+}
+
+float3 Turbo(float X)
+{
+	X = saturate(X);
+	const float3 A = float3(0.13, 0.09, 0.53), B = float3(0.1, 0.73, 0.91), C = float3(0.98, 0.87, 0.2), D = float3(0.83, 0.15, 0.09);
+	return X < 0.33 ? lerp(A, B, X / 0.33) : (X < 0.66 ? lerp(B, C, (X - 0.33) / 0.33) : lerp(C, D, (X - 0.66) / 0.34));
+}
+
+// ---------------------------------------------------------------- lighting cache
+RWTexture3D<float4> RWLightCache;
+
+[numthreads(4, 4, 4)]
+void LightCS(uint3 Id : SV_DispatchThreadID)
+{
+	const uint I = Id.z / GRID_N;
+	if (I >= NumSmokes) return;
+	const uint3 V = uint3(Id.xy, Id.z % GRID_N);
+	const float3 P = SmokeA[I].xyz + (float3(V) + 0.5) * VoxelCm;
+	float Heat;
+	const float D = Density(P, false, Heat);
+	const uint Slot = (uint)SmokeA[I].w;
+	RWLightCache[uint3(Slot * SLOT_STRIDE + V.x, V.y, V.z)] = float4(Incident(P, D), 1);
+}
+
+// ---------------------------------------------------------------- ray march
+Texture2D<float> SceneDepth;
+RWTexture2D<float4> RWSmokeColor;
+RWTexture2D<float> RWSmokeDepth;
+uint2 LowSize;
+uint ResDiv;
+int2 ViewMin;
+int2 ViewMax;
+
+float SceneDistance(float2 SvPos, float3 Dir)
+{
+	const float DeviceZ = SceneDepth.Load(int3(SvPos, 0));
+	if (DeviceZ <= 0.0) return 1e7;
+	return ConvertFromDeviceZ(DeviceZ) / max(dot(Dir, View.ViewForward), 1e-3);
+}
+
+float3 RayDir(float2 SvPos)
+{
+	const float3 P = SvPositionToTranslatedWorld(float4(SvPos, 0.5, 1));
+	return normalize(P - View.TranslatedWorldCameraOrigin);
+}
+
+float4 March(float3 O, float3 Dir, float TMax, float Jitter)
+{
+	// union of the smoke boxes along the ray
+	float T0 = 1e9, T1 = -1;
+	for (uint I = 0; I < NumSmokes; ++I)
+	{
+		const float3 BMin = SmokeA[I].xyz, BMax = BMin + GRID_N * VoxelCm;
+		float3 SafeDir = Dir;
+		SafeDir.x = abs(SafeDir.x) < 1e-6 ? 1e-6 : SafeDir.x;
+		SafeDir.y = abs(SafeDir.y) < 1e-6 ? 1e-6 : SafeDir.y;
+		SafeDir.z = abs(SafeDir.z) < 1e-6 ? 1e-6 : SafeDir.z;
+		const float3 Inv = 1.0 / SafeDir;
+		const float3 TA = (BMin - O) * Inv, TB = (BMax - O) * Inv;
+		const float3 Lo = min(TA, TB), Hi = max(TA, TB);
+		const float A = max(max(Lo.x, Lo.y), Lo.z), B = min(min(Hi.x, Hi.y), Hi.z);
+		if (A < B && B > 0) { T0 = min(T0, max(A, 0)); T1 = max(T1, B); }
+	}
+	T1 = min(T1, TMax - 2);
+	if (T1 <= T0) return 0;
+	float3 Col = 0;
+	float Alpha = 0;
+	const float Sigma = 0.035;
+	uint Steps = 0;
+	for (float T = T0 + Jitter * StepCm; T < T1 && Alpha < 0.995 && Steps < MaxSteps; T += StepCm, ++Steps)
+	{
+		const float3 P = O + Dir * T;
+		float Heat;
+		const float D = Density(P, true, Heat);
+		if (D <= 0.001) continue;
+		float3 L;
+		if (DebugView == 1)
+			L = Turbo(Heat) * (SkyIlluminance + SunIlluminance) * 0.25;
+		else
+		{
+			float3 E;
+			if (LightMode == 0)
+			{
+				// nearest smoke's cache (the cloud that contributes most)
+				E = 0;
+				float W = 0;
+				for (uint I = 0; I < NumSmokes; ++I)
+				{
+					float Depth;
+					const float Bi = BaseDensity(I, P, Depth);
+					if (Bi <= 0) continue;
+					const float3 G = (P - SmokeA[I].xyz) / VoxelCm;
+					E += LightCache.SampleLevel(LinearClamp, AtlasUVW((uint)SmokeA[I].w, G), 0).rgb * Bi;
+					W += Bi;
+				}
+				E = W > 0 ? E / W : SkyIlluminance;
+			}
+			else if (LightMode == 1) E = Incident(P, D);
+			else E = (SkyIlluminance + SunIlluminance) * 0.5;
+			L = E * (0.68 / PI);	// a grey-white single-scattering albedo keeps the sunlit side out of clipping
+			if (DebugView == 2) L = E * 0.1;
+		}
+		const float A = 1 - exp(-D * Sigma * StepCm * (DebugView == 1 ? 0.15 : 1.0));	// the heat map is see-through so the early-arrival core shows
+		Col += (1 - Alpha) * A * L;
+		Alpha += (1 - Alpha) * A;
+	}
+	return float4(Col * View.PreExposure, Alpha);
+}
+
+float IGN(float2 P)
+{
+	return frac(52.9829189 * frac(dot(P, float2(0.06711056, 0.00583715)) + Time * 0.0));
+}
+
+[numthreads(8, 8, 1)]
+void MarchCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (any(Id.xy >= LowSize)) return;
+	const float2 SvPos = min(ViewMin + (float2(Id.xy) + 0.5) * ResDiv, ViewMax - 0.5);
+	const float3 Dir = RayDir(SvPos);
+	const float TMax = SceneDistance(SvPos, Dir);
+	RWSmokeColor[Id.xy] = March(View.TranslatedWorldCameraOrigin, Dir, TMax, IGN(Id.xy));
+	RWSmokeDepth[Id.xy] = TMax;
+}
+
+// ---------------------------------------------------------------- composite (full resolution)
+Texture2D<float4> SmokeColor;
+Texture2D<float> SmokeDepth;
+uint UpsampleMode;
+
+void CompositePS(float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+	const float2 SvPos = SvPosition.xy;
+	const float2 L = (SvPos - ViewMin) / ResDiv - 0.5;
+	const int2 B = (int2)floor(L);
+	const float2 F = L - B;
+	const int2 Mx = int2(LowSize) - 1;
+	if (ResDiv == 1 || UpsampleMode == 0)
+	{
+		const float2 UV = (L + 0.5) / float2(LowSize);
+		OutColor = SmokeColor.SampleLevel(LinearClamp, UV, 0);
+		return;
+	}
+	const float3 Dir = RayDir(SvPos);
+	const float Z = SceneDistance(SvPos, Dir);
+	float4 Acc = 0;
+	float WSum = 0;
+	bool bMatch = false;
+	// 4x4 low-res taps under a tent of radius 1.5 texels: wider than bilinear, so the per-pixel march jitter
+	// averages out instead of showing as a 4x4-pixel dither pattern at the cloud edge
+	for (int K = 0; K < 16; ++K)
+	{
+		const int2 O = int2(K & 3, K >> 2) - 1;
+		const int2 P = clamp(B + O, 0, Mx);
+		const float2 Dd = abs(float2(O) - F);
+		const float Wb = max(1.5 - Dd.x, 0) * max(1.5 - Dd.y, 0);
+		const float Zi = SmokeDepth.Load(int3(P, 0));
+		const float Rel = abs(Zi - Z) / max(Z, 1);
+		bMatch = bMatch || Rel < 0.04;
+		const float W = Wb * exp(-Rel * 40) + 1e-4;
+		Acc += SmokeColor.Load(int3(P, 0)) * W;
+		WSum += W;
+	}
+	OutColor = Acc / WSum;
+	if (UpsampleMode == 2 && !bMatch)
+		OutColor = March(View.TranslatedWorldCameraOrigin, Dir, Z, IGN(SvPos));	// full-res fix-up where no low-res sample sees this surface
+}

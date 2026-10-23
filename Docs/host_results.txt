@@ -1,0 +1,13 @@
+PASS smoke_spawned filled 955 voxels in 340 us
+PASS gpu_timers light 0.49 march 0.30 composite 0.63 ms at 334x188
+PASS bullet_tunnel smoke along the shot 900 cm before, 82 cm just after one round
+PASS he_debug blasts 1 at X=2389.915 Y=800.000 Z=5.018 mask 1, cam X=1950.000 Y=800.000 Z=158.150 density at cam 0.02
+PASS he_clear_refill density at the blast 0.02 just after, 1.00 five seconds later
+PASS ruleA_leaks 180 of 878 voxels on the far side of the thin wall
+PASS ruleC_no_leak 955 voxels
+PASS sentry_sees_me standing in the open mid lane
+PASS smoke_blinds_sentry 860 cm of smoke on the sight line
+PASS door_refill density past the door 0.00 -> 1.00
+PASS plant held E for 3.7 s in the zone
+PASS quarter_cheaper march 7.82 ms full-res procedural, 0.49 ms quarter-res texture
+PASS frame_time 9.0 ms/frame

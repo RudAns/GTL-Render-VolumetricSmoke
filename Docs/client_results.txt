@@ -1,0 +1,5 @@
+PASS client_server_result 955 voxels arrived in 634 bytes, crc b858f466 = server b858f466
+PASS desync_detected local fill 955 voxels, crc 1164ab68 vs server 1356d3ae, 24 bytes on the wire
+PASS relevancy_cull sentries known to this client: 3 before the smoke, 1 after
+PASS cull_off_restores 3 sentries
+PASS client_frame_time 19.9 ms/frame
