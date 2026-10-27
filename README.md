@@ -1,8 +1,23 @@
+<div align="center">
+
 # 《反恐精英2》式的响应式体积烟雾
 
-从 Valve 的《反恐精英2》（Counter-Strike 2，2023）的“响应式烟雾”（Responsive Smokes）到 UE5：烟雾按关卡几何体素化扩散，能被子弹打出通道、被高爆手雷暂时推开，并且联机时所有玩家看到同一团烟。技术调研加上 UE 5.8 中可以联机的交互复现。
+**体素化扩散 · 到达距离场 · 事件挖空 · RDG 光线步进 · 深度感知上采样 · 联网同步**<br>
+烟雾按关卡几何扩散，能被子弹打穿、被高爆手雷推开，联机时所有玩家看到同一团烟：技术调研 + UE 5.8 可联机的交互复现
+
+<a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-0a7bbb"></a>
+<img alt="引擎 UE 5.8" src="https://img.shields.io/badge/%E5%BC%95%E6%93%8E-UE_5.8-313131?logo=unrealengine">
+<img alt="代码 C++ · HLSL" src="https://img.shields.io/badge/%E4%BB%A3%E7%A0%81-C%2B%2B_%C2%B7_HLSL-00599c">
+<a href="Docs/Research.html"><img alt="调研 56 篇文献" src="https://img.shields.io/badge/%E8%B0%83%E7%A0%94-56_%E7%AF%87%E6%96%87%E7%8C%AE-e05d44"></a>
+<img alt="联机 支持" src="https://img.shields.io/badge/%E8%81%94%E6%9C%BA-%E6%94%AF%E6%8C%81-8a2be2">
+
+[📥 下载调研报告](Docs/Research.html) · [📥 下载落地文档](Docs/Implementation.html) · [🎮 运行 Demo](#ue-58-可交互-demo) · [⌨️ 操作说明](#操作)
+
+<br>
 
 [![调研报告封面](Docs/shots/00_research_cover.png)](Docs/Research.html)
+
+</div>
 
 ## 调研报告
 
