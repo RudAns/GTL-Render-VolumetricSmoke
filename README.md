@@ -11,7 +11,7 @@
 <a href="Docs/Research.html"><img alt="调研 56 篇文献" src="https://img.shields.io/badge/%E8%B0%83%E7%A0%94-56_%E7%AF%87%E6%96%87%E7%8C%AE-e05d44"></a>
 <img alt="联机 支持" src="https://img.shields.io/badge/%E8%81%94%E6%9C%BA-%E6%94%AF%E6%8C%81-8a2be2">
 
-[📥 下载调研报告](Docs/Research.html) · [📥 下载落地文档](Docs/Implementation.html)
+[📥 下载调研报告](https://github.com/RudAns/GTL-Render-VolumetricSmoke/releases/latest/download/Research.html) · [📥 下载落地文档](https://github.com/RudAns/GTL-Render-VolumetricSmoke/releases/latest/download/Implementation.html)
 
 <br>
 
